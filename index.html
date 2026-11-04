@@ -11,21 +11,29 @@ button.sec{background:#475569}video,canvas{width:100%;border-radius:10px;backgro
 </style></head><body><main>
 <h1>📷 Room Watcher</h1>
 <div id="home" class="card" hidden>
-<p>Use this laptop as a camera, and get photos on your phone when a person or dog shows up.</p>
-<button onclick="go('cam')">Start camera on this device</button></div>
+<p>Turn any phone or laptop into a camera. Watch it live and get photos when a person or dog shows up.</p>
+<button style="width:100%" onclick="go('cam')">📷 Use this device as the camera</button>
+<p class="muted" style="margin-top:14px">Watching from another device? Scan the camera's QR code, or paste its room code:</p>
+<input id="roomIn" placeholder="room code, e.g. rw-abc123" style="width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:0;font-size:1rem">
+<button class="sec" style="width:100%" onclick="joinView()">👀 Watch the camera (viewer)</button></div>
 <div id="cam" hidden>
-<div class="card"><b>On your phone:</b> scan this code or open the link.<br>
+<div class="card"><b>On the viewing device (phone or laptop):</b> scan this code or open the link. Room code: <code id="rcode"></code><br>
 <img id="qr" alt="QR code" style="background:#fff;padding:8px;border-radius:8px;margin:8px 0"><br><a id="vlink"></a>
-<p class="muted">Keep this tab open and the laptop awake. Anyone with the link can see the photos, so keep it private.</p></div>
+<p class="muted">Keep this tab open and the device awake and plugged in. Anyone with the link can see the photos, so keep it private.</p></div>
 <div class="card"><button id="startBtn" onclick="startCam()">Start watching</button>
+<button class="sec" id="flipBtn" onclick="flip()">🔄 Front/back camera</button>
 <label><input type="checkbox" id="wPerson" checked> Person</label> <label><input type="checkbox" id="wDog" checked> Dog</label>
-<p id="status" class="muted">Not started.</p><canvas id="view"></canvas><video id="vid" playsinline muted hidden></video>
+<p id="status" class="muted">Not started.</p><p id="pstat" class="muted"></p><canvas id="view"></canvas><video id="vid" playsinline muted hidden></video>
 <div id="log"></div></div></div>
 <div id="view-mode" hidden>
+<div class="card"><b>🔴 Live feed</b> <span id="lstat" class="muted">Connecting…</span>
+<video id="live" playsinline autoplay muted controls style="margin-top:8px"></video>
+<button id="recBtn" onclick="toggleRec()" disabled>⏺ Record</button><span id="rstat" class="muted"></span><div id="recs"></div></div>
 <div class="card"><button onclick="enableNotif()">Turn on alerts</button><span id="nstat" class="muted"></span>
 <p class="muted">Keep this page open to get alerts. Newest photos are on top. Photos are kept for about a few hours.</p></div>
 <div id="feed"><p class="muted">Waiting for photos…</p></div></div>
 </main>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <script>
@@ -34,16 +42,29 @@ const COOLDOWN=30000,MIN=0.5,NTFY='https://ntfy.sh/';
 const $=id=>document.getElementById(id);
 function go(m){if(!room)room='rw-'+[...crypto.getRandomValues(new Uint8Array(9))].map(b=>b.toString(36).padStart(2,'0')).join('').slice(0,14);
 location.search='?room='+room+'&mode='+m}
+function joinView(){let r=$('roomIn').value.trim();const m=r.match(/room=([\w-]+)/);if(m)r=m[1];if(!/^[\w-]{3,40}$/.test(r)){alert('Enter a valid room code');return}location.search='?room='+r+'&mode=view'}
+const ICE={config:{iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]}};const camId=()=>'roomwatch-'+room+'-cam';
 function tstr(d){return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}
 if(!room||!mode)$('home').hidden=false;
 else if(mode==='cam'){$('cam').hidden=false;const u=location.origin+location.pathname+'?room='+room+'&mode=view';
-$('vlink').href=u;$('vlink').textContent=u;$('qr').src='https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(u);}
+$('rcode').textContent=room;$('vlink').href=u;$('vlink').textContent=u;$('qr').src='https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(u);}
 else viewer();
 // ---- camera ----
-let model,last={};
+let model,last={},facing='environment',stream,peer,calls=[];
+async function getStream(){stream?.getTracks().forEach(t=>t.stop());
+stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:640},height:{ideal:480}}});
+const v=$('vid');v.srcObject=stream;await v.play();
+calls.forEach(c=>{const snd=c.peerConnection?.getSenders().find(x=>x.track&&x.track.kind==='video');snd&&snd.replaceTrack(stream.getVideoTracks()[0])})}
+async function flip(){facing=facing==='user'?'environment':'user';if(stream)try{await getStream()}catch(e){$('status').textContent='Problem: '+e.message}}
+function startPeer(){const ps=$('pstat');ps.textContent='Live feed: connecting to broker…';
+peer=new Peer(camId(),ICE);peer.on('open',()=>ps.textContent='Live feed: ready, '+calls.length+' viewer(s)');
+peer.on('connection',dc=>{dc.on('open',()=>{const c=peer.call(dc.peer,stream);if(!c)return;calls.push(c);ps.textContent='Live feed: '+calls.length+' viewer(s) 👀';
+const drop=()=>{calls=calls.filter(x=>x!==c);ps.textContent='Live feed: '+calls.length+' viewer(s)'};c.on('close',drop);c.on('error',drop);dc.on('close',()=>{c.close();drop()})})});
+peer.on('disconnected',()=>{ps.textContent='Live feed: reconnecting…';setTimeout(()=>peer.destroyed||peer.reconnect(),2000)});
+peer.on('error',e=>{ps.textContent='Live feed problem: '+(e.type==='unavailable-id'?'this room camera is already open in another tab/device':e.type);
+if(e.type!=='unavailable-id'&&peer.destroyed)setTimeout(startPeer,5000);if(e.type==='unavailable-id'){peer.destroy();setTimeout(startPeer,10000)}})}
 async function startCam(){const s=$('status');$('startBtn').disabled=true;
-try{s.textContent='Asking for camera…';const st=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
-const v=$('vid');v.srcObject=st;await v.play();s.textContent='Loading detector (first time can take a bit)…';
+try{s.textContent='Asking for camera…';await getStream();startPeer();s.textContent='Loading detector (first time can take a bit)…';
 model=await cocoSsd.load({base:'lite_mobilenet_v2'});s.textContent='Watching ✅';
 try{await navigator.wakeLock?.request('screen')}catch(e){}loop();}
 catch(e){s.textContent='Problem: '+e.message;$('startBtn').disabled=false}}
@@ -70,7 +91,24 @@ function beep(){try{audioCtx=audioCtx||new AudioContext();const o=audioCtx.creat
 async function enableNotif(){audioCtx=audioCtx||new AudioContext();beep();
 if(!('Notification'in window)){$('nstat').textContent=' Sound on. (Pop-up alerts not supported here — on iPhone, Share > Add to Home Screen first.)';return}
 const p=await Notification.requestPermission();$('nstat').textContent=p==='granted'?' Alerts on ✅':' Sound only (alerts blocked)'}
-async function viewer(){$('view-mode').hidden=false;
+let vpeer,gotLive=false,retry,rec,chunks=[];
+function liveConnect(){const ls=$('lstat');vpeer=new Peer(ICE);
+vpeer.on('open',()=>{const tryDial=()=>{if(gotLive)return;ls.textContent='Waiting for camera… (open the camera page and tap Start watching)';
+const dc=vpeer.connect(camId());dc.on('close',()=>{gotLive=false;ls.textContent='Camera disconnected — waiting…'});};tryDial();clearInterval(retry);retry=setInterval(tryDial,5000)});
+vpeer.on('call',c=>{c.answer();c.on('stream',st=>{gotLive=true;const v=$('live');v.srcObject=st;v.play().catch(()=>{});ls.textContent='Live ✅';$('recBtn').disabled=false});
+const lost=()=>{gotLive=false;$('lstat').textContent='Camera disconnected — waiting…'};c.on('close',lost);c.on('error',lost);
+c.peerConnection&&(c.peerConnection.oniceconnectionstatechange=()=>{const st=c.peerConnection.iceConnectionState;if(st==='failed'||st==='disconnected'){lost();c.close()}})});
+vpeer.on('error',e=>{if(e.type!=='peer-unavailable')ls.textContent='Live feed problem: '+e.type});
+vpeer.on('disconnected',()=>setTimeout(()=>vpeer.destroyed||vpeer.reconnect(),2000))}
+function toggleRec(){const b=$('recBtn');if(rec&&rec.state==='recording'){rec.stop();return}
+const st=$('live').srcObject;if(!st){return}chunks=[];
+const mt=['video/webm;codecs=vp9','video/webm','video/mp4'].find(t=>window.MediaRecorder&&MediaRecorder.isTypeSupported(t));
+try{rec=new MediaRecorder(st,mt?{mimeType:mt}:{})}catch(e){$('rstat').textContent=' Recording not supported here';return}
+rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+rec.onstop=()=>{const bl=new Blob(chunks,{type:rec.mimeType}),u=URL.createObjectURL(bl),ext=rec.mimeType.includes('mp4')?'mp4':'webm',n='room-'+new Date().toISOString().replace(/[:.]/g,'-')+'.'+ext;
+$('recs').insertAdjacentHTML('afterbegin','<p><a download="'+n+'" href="'+u+'">💾 Save '+n+'</a></p>');b.textContent='⏺ Record';$('rstat').textContent=''};
+rec.start(1000);b.textContent='⏹ Stop';$('rstat').textContent=' Recording…'}
+async function viewer(){$('view-mode').hidden=false;liveConnect();
 try{const t=await (await fetch(NTFY+room+'/json?poll=1&since=24h')).text();t.trim().split('\n').filter(Boolean).forEach(l=>add(JSON.parse(l),false))}catch(e){}
 const es=new EventSource(NTFY+room+'/sse');es.onmessage=e=>add(JSON.parse(e.data),true)}
 </script></body></html>
