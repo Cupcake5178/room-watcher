@@ -1,0 +1,76 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Room Watcher</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}
+main{max-width:720px;margin:auto;padding:16px}h1{font-size:1.5rem}
+.card{background:#1e293b;border-radius:14px;padding:16px;margin:12px 0}
+button{background:#3b82f6;color:#fff;border:0;border-radius:10px;padding:12px 18px;font-size:1rem;margin:4px 4px 4px 0}
+button.sec{background:#475569}video,canvas{width:100%;border-radius:10px;background:#000}
+#log,#feed{font-size:.9rem}.shot{margin:12px 0}.shot img{width:100%;border-radius:10px}
+.muted{color:#94a3b8;font-size:.85rem}a{color:#93c5fd;word-break:break-all}
+</style></head><body><main>
+<h1>📷 Room Watcher</h1>
+<div id="home" class="card" hidden>
+<p>Use this laptop as a camera, and get photos on your phone when a person or dog shows up.</p>
+<button onclick="go('cam')">Start camera on this device</button></div>
+<div id="cam" hidden>
+<div class="card"><b>On your phone:</b> scan this code or open the link.<br>
+<img id="qr" alt="QR code" style="background:#fff;padding:8px;border-radius:8px;margin:8px 0"><br><a id="vlink"></a>
+<p class="muted">Keep this tab open and the laptop awake. Anyone with the link can see the photos, so keep it private.</p></div>
+<div class="card"><button id="startBtn" onclick="startCam()">Start watching</button>
+<label><input type="checkbox" id="wPerson" checked> Person</label> <label><input type="checkbox" id="wDog" checked> Dog</label>
+<p id="status" class="muted">Not started.</p><canvas id="view"></canvas><video id="vid" playsinline muted hidden></video>
+<div id="log"></div></div></div>
+<div id="view-mode" hidden>
+<div class="card"><button onclick="enableNotif()">Turn on alerts</button><span id="nstat" class="muted"></span>
+<p class="muted">Keep this page open to get alerts. Newest photos are on top. Photos are kept for about a few hours.</p></div>
+<div id="feed"><p class="muted">Waiting for photos…</p></div></div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+const P=new URLSearchParams(location.search);let room=P.get('room'),mode=P.get('mode');
+const COOLDOWN=30000,MIN=0.5,NTFY='https://ntfy.sh/';
+const $=id=>document.getElementById(id);
+function go(m){if(!room)room='rw-'+[...crypto.getRandomValues(new Uint8Array(9))].map(b=>b.toString(36).padStart(2,'0')).join('').slice(0,14);
+location.search='?room='+room+'&mode='+m}
+function tstr(d){return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}
+if(!room||!mode)$('home').hidden=false;
+else if(mode==='cam'){$('cam').hidden=false;const u=location.origin+location.pathname+'?room='+room+'&mode=view';
+$('vlink').href=u;$('vlink').textContent=u;$('qr').src='https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(u);}
+else viewer();
+// ---- camera ----
+let model,last={};
+async function startCam(){const s=$('status');$('startBtn').disabled=true;
+try{s.textContent='Asking for camera…';const st=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+const v=$('vid');v.srcObject=st;await v.play();s.textContent='Loading detector (first time can take a bit)…';
+model=await cocoSsd.load({base:'lite_mobilenet_v2'});s.textContent='Watching ✅';
+try{await navigator.wakeLock?.request('screen')}catch(e){}loop();}
+catch(e){s.textContent='Problem: '+e.message;$('startBtn').disabled=false}}
+async function loop(){const v=$('vid'),c=$('view'),x=c.getContext('2d');c.width=v.videoWidth;c.height=v.videoHeight;
+const preds=await model.detect(v);x.drawImage(v,0,0);x.lineWidth=3;x.font='18px sans-serif';
+const want=[];if($('wPerson').checked)want.push('person');if($('wDog').checked)want.push('dog');
+for(const p of preds){if(p.score<MIN||!want.includes(p.class))continue;const[a,b,w,h]=p.bbox;
+x.strokeStyle=x.fillStyle='#22c55e';x.strokeRect(a,b,w,h);x.fillText(p.class+' '+Math.round(p.score*100)+'%',a+4,b+20);
+const now=Date.now();if(!last[p.class]||now-last[p.class]>COOLDOWN){last[p.class]=now;send(p.class,c)}}
+setTimeout(loop,400)}
+function send(cls,c){const name=cls[0].toUpperCase()+cls.slice(1),title=name+' spotted '+tstr(new Date());
+c.toBlob(async b=>{try{const r=await fetch(NTFY+room,{method:'PUT',body:b,headers:{'Filename':'alert.jpg','Title':title,'Tags':cls==='dog'?'dog':'bust_in_silhouette'}});
+$('log').insertAdjacentHTML('afterbegin','<p>'+(r.ok?'📤 Sent: ':'⚠️ Send failed: ')+title+'</p>')}catch(e){$('log').insertAdjacentHTML('afterbegin','<p>⚠️ '+e.message+'</p>')}},'image/jpeg',0.8)}
+// ---- viewer ----
+const seen=new Set();let audioCtx;
+function add(m,live){if(m.event!=='message'||seen.has(m.id)||!m.attachment)return;seen.add(m.id);
+const f=$('feed');if(seen.size===1)f.innerHTML='';const d=new Date(m.time*1000);
+const el=document.createElement('div');el.className='card shot';el.dataset.t=m.time;
+el.innerHTML='<b></b><div class="muted"></div><img loading="lazy">';el.querySelector('b').textContent=m.title||'Alert';
+el.querySelector('.muted').textContent=d.toLocaleString();el.querySelector('img').src=m.attachment.url;
+const after=[...f.children].find(n=>+n.dataset.t<m.time);f.insertBefore(el,after||null);
+if(live){if(Notification?.permission==='granted')try{new Notification(m.title||'Room Watcher',{body:d.toLocaleTimeString(),icon:m.attachment.url})}catch(e){}beep()}}
+function beep(){try{audioCtx=audioCtx||new AudioContext();const o=audioCtx.createOscillator(),g=audioCtx.createGain();o.connect(g);g.connect(audioCtx.destination);o.frequency.value=880;g.gain.value=.2;o.start();o.stop(audioCtx.currentTime+.3)}catch(e){}}
+async function enableNotif(){audioCtx=audioCtx||new AudioContext();beep();
+if(!('Notification'in window)){$('nstat').textContent=' Sound on. (Pop-up alerts not supported here — on iPhone, Share > Add to Home Screen first.)';return}
+const p=await Notification.requestPermission();$('nstat').textContent=p==='granted'?' Alerts on ✅':' Sound only (alerts blocked)'}
+async function viewer(){$('view-mode').hidden=false;
+try{const t=await (await fetch(NTFY+room+'/json?poll=1&since=24h')).text();t.trim().split('\n').filter(Boolean).forEach(l=>add(JSON.parse(l),false))}catch(e){}
+const es=new EventSource(NTFY+room+'/sse');es.onmessage=e=>add(JSON.parse(e.data),true)}
+</script></body></html>
